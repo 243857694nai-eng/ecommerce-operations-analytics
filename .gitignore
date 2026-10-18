@@ -1,0 +1,24 @@
+# Python 缓存与测试覆盖率输出
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# 本地虚拟环境和环境变量文件
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# 现有自动测试创建的隔离临时目录
+/csv_validation_*/
+/metrics_test_*/
+
+# 运行日志及将来生成的报告输出（不忽略 data/ 或 docs/）
+*.log
+/reports/
+/output/
+/outputs/

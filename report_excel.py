@@ -13,6 +13,7 @@ def main(argv=None):
                         default=Path(__file__).parent / "data" / "sample_orders.csv",
                         help="CSV 或 .xlsx 路径；Excel 需交互确认，默认仍使用原模拟 CSV")
     parser.add_argument("--output", type=Path, help="新建 .xlsx 的路径；默认保存到项目 output 目录；拒绝覆盖")
+    parser.add_argument("--visual", action="store_true", help="增加5C模拟数据可视化分析表和图表；默认仍为原三工作表")
     args = parser.parse_args(argv)
     try:
         from excel_report import ExcelReportError, export_excel
@@ -22,7 +23,8 @@ def main(argv=None):
         print("缺少 Excel 导出依赖。请使用本项目 .venv\\Scripts\\python.exe 运行；程序不会自动安装软件。")
         return 2
     try:
-        destination = export_excel(args.csv_file, args.output)
+        destination = (export_excel(args.csv_file, args.output, visual=True) if args.visual else
+                       export_excel(args.csv_file, args.output))
     except CsvValidationError as error:
         print(f"校验未通过，共发现 {len(error.issues)} 个问题：")
         for issue in error.issues:
@@ -46,6 +48,8 @@ def main(argv=None):
         print(f"操作未完成（{type(error).__name__}），已停止，未报告导出成功。")
         return 1
     print(f"Excel 报表已生成：{destination}")
+    if args.visual:
+        print("另含销售趋势、商品销售分析、退款分析；仅为模拟数据，下单日期快照不等于资金发生日流水。")
     if args.csv_file.suffix.lower() == ".xlsx":
         print("包含运营总览、商品销量排行、数据校验摘要；原始 Excel 未修改。")
     else:

@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date
 from fractions import Fraction
 from pathlib import Path
 
@@ -29,6 +30,21 @@ class ProductMetrics:
 
 
 @dataclass(frozen=True)
+class DailyMetrics:
+    """按北京时间下单日期归组的当前订单快照，不是资金发生日流水。"""
+
+    day: date
+    payment_cents: int
+    refund_cents: int
+    paid_order_count: int
+    refund_order_count: int
+
+    @property
+    def net_sales_cents(self) -> int:
+        return self.payment_cents - self.refund_cents
+
+
+@dataclass(frozen=True)
 class MetricsReport:
     line_count: int
     total_order_count: int
@@ -39,6 +55,21 @@ class MetricsReport:
     products: tuple[ProductMetrics, ...]
     # 来源用于追溯，不参与业务指标值的等价比较。
     source: OrderSource | None = field(default=None, compare=False)
+    daily: tuple[DailyMetrics, ...] = ()
+    full_refund_order_count: int = 0
+    partial_refund_order_count: int = 0
+
+    @property
+    def refund_order_count(self) -> int:
+        return self.full_refund_order_count + self.partial_refund_order_count
+
+    @property
+    def refund_amount_ratio(self) -> Fraction | None:
+        return Fraction(self.refund_cents, self.payment_cents) if self.payment_cents else None
+
+    @property
+    def refund_order_ratio(self) -> Fraction | None:
+        return Fraction(self.refund_order_count, self.paid_order_count) if self.paid_order_count else None
 
     @property
     def net_sales_cents(self) -> int:
@@ -70,11 +101,23 @@ def calculate_metrics(path: str | Path) -> MetricsReport:
     product_lines = defaultdict(list)
     payment = 0
     refund = 0
+    daily_amounts = defaultdict(lambda: [0, 0])
+    daily_paid_orders = defaultdict(set)
+    daily_refund_orders = defaultdict(set)
+    paid_statuses = {}
     for row in records:
+        day = row.order_time.date()
+        day_amounts = daily_amounts[day]  # 未支付或取消订单所在日期保留为零，不填造缺失日期。
         if row.order_status not in PAID_STATUSES:
             continue
         payment += row.payment_amount_cents
         refund += row.refund_amount_cents
+        day_amounts[0] += row.payment_amount_cents
+        day_amounts[1] += row.refund_amount_cents
+        daily_paid_orders[day].add(row.order_id)
+        if row.refund_amount_cents > 0:
+            daily_refund_orders[day].add(row.order_id)
+        paid_statuses[row.order_id] = row.order_status
         # 每个订单只有一个键；一单多商品仍只算一笔订单。
         order_net[row.order_id] += row.payment_amount_cents - row.refund_amount_cents
         product_lines[row.product_id].append(row)
@@ -101,6 +144,11 @@ def calculate_metrics(path: str | Path) -> MetricsReport:
         net_order_count=sum(net > 0 for net in order_net.values()),
         products=tuple(products),
         source=orders.source,
+        daily=tuple(DailyMetrics(day, amounts[0], amounts[1], len(daily_paid_orders[day]),
+                                 len(daily_refund_orders[day]))
+                    for day, amounts in sorted(daily_amounts.items())),
+        full_refund_order_count=sum(status == "已全额退款" for status in paid_statuses.values()),
+        partial_refund_order_count=sum(status == "部分退款" for status in paid_statuses.values()),
     )
 
 

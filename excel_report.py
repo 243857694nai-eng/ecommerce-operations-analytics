@@ -7,8 +7,12 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+from xml.etree.ElementTree import tostring
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.axis import DateAxis
+from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from metrics import MetricsReport, calculate_metrics, format_money
@@ -16,6 +20,7 @@ from order_validator import BEIJING_TIME
 
 
 SHEET_NAMES = ("运营总览", "商品销量排行", "数据校验摘要")
+VISUAL_SHEET_NAMES = ("销售趋势", "商品销售分析", "退款分析")
 MONEY_FORMAT = '#,##0.00'
 COUNT_FORMAT = '#,##0'
 DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output"
@@ -153,6 +158,172 @@ def _build_workbook(report: MetricsReport, source_name: str, generated_at: datet
     return workbook
 
 
+def _analysis_style(sheet, widths, header_row, note):
+    """原有三张表不移动；新分析表用独立标题、口径提示及数据表头。"""
+    _style(sheet, widths)
+    last = max(len(row) for row in sheet.iter_rows())
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last)
+    sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last)
+    sheet.merge_cells(start_row=3, start_column=1, end_row=3, end_column=last)
+    sheet.row_dimensions[1].height = 32
+    sheet.row_dimensions[3].height = 36
+    sheet.cell(2, 1, note)
+    sheet.row_dimensions[2].height = 64
+    sheet.cell(2, 1).alignment = Alignment(wrap_text=True, vertical="center")
+    sheet.cell(2, 1).font = Font(name="微软雅黑", size=11, color="8A4400")
+    for cell in sheet[header_row]:
+        cell.font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
+        cell.fill = PatternFill("solid", fgColor="244A64")
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    sheet.row_dimensions[header_row].height = 42
+    sheet.freeze_panes = f"A{header_row + 1}"
+    sheet.print_title_rows = f"1:{header_row}"
+    sheet.sheet_properties.tabColor = "244A64"
+    sheet.sheet_view.zoomScale = 90
+
+
+def _line_chart(sheet, title, header_row, end_row, columns, anchor):
+    if end_row <= header_row:
+        return
+    chart = LineChart()
+    chart.title = title
+    chart.title.overlay = False
+    chart.style = 13
+    chart.width, chart.height = 21, 12
+    chart.varyColors = False  # 单条退款曲线也只保留一个系列图例，不按每个日期生成图例。
+    # 单位和日期归组写入图表标题；省去部分 Excel 版本会与刻度重叠的轴标题。
+    chart.y_axis.numFmt = MONEY_FORMAT
+    chart.y_axis.crossAx = 500
+    chart.x_axis = DateAxis(crossAx=100)
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.x_axis.number_format = "yyyy-mm-dd"
+    chart.x_axis.majorTimeUnit = "days"
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+    for axis in (chart.x_axis, chart.y_axis):
+        axis.delete = False
+        axis.tickLblPos = "nextTo"
+    chart.y_axis.majorGridlines.spPr = GraphicalProperties()
+    chart.y_axis.majorGridlines.spPr.line.solidFill = "E2E8F0"
+    for column in columns:
+        chart.add_data(Reference(sheet, min_col=column, min_row=header_row, max_row=end_row),
+                       titles_from_data=True)
+    chart.set_categories(Reference(sheet, min_col=1, min_row=header_row + 1, max_row=end_row))
+    for series, color in zip(chart.series, ("2878B5", "E58B2A", "2B8A6E")):
+        series.graphicalProperties.line.solidFill = color
+        series.graphicalProperties.line.width = 26000
+        series.marker.symbol = "circle"  # 单日数据仍能看到实际数据点。
+        series.marker.size = 5
+        series.marker.graphicalProperties.solidFill = color
+        series.marker.graphicalProperties.line.solidFill = color
+        series.smooth = False
+    sheet.add_chart(chart, anchor)
+
+
+def _display_ratio(value):
+    # 精确 Fraction 保留在模型中；这里只生成展示用、四舍五入到 0.01% 的数值。
+    return format_money(None) if value is None else Decimal(format_money(value * 10000)) / 100
+
+
+def _add_visual_analysis(workbook: Workbook, report: MetricsReport):
+    trend = workbook.create_sheet(VISUAL_SHEET_NAMES[0])
+    _append(trend, ("销售趋势｜模拟数据",))
+    _append(trend, (None,))
+    _append(trend, ("仅展示源数据中出现的下单日期；缺失日期不补零，折线只连接已观测点。",))
+    _append(trend, ("下单日期", "支付金额（元）", "退款金额（元）", "净成交金额（元）"))
+    for day in report.daily:
+        _append(trend, (datetime(day.day.year, day.day.month, day.day.day), _money(day.payment_cents),
+                        _money(day.refund_cents), _money(day.net_sales_cents)))
+        trend.cell(trend.max_row, 1).number_format = "yyyy-mm-dd"
+        for column in range(2, 5):
+            trend.cell(trend.max_row, column).number_format = MONEY_FORMAT
+    _analysis_style(trend, {"A": 28, "B": 22, "C": 22, "D": 24}, 4,
+                    "虚构模拟订单。按下单日期归组的支付、累计退款及净额快照；缺少支付/退款发生时间，不能解释为当日资金流水。净成交金额沿用净销售额口径，不等于利润。")
+    _line_chart(trend, "销售快照（按下单日期归组，元｜模拟数据）", 4, trend.max_row, (2, 3, 4), "F4")
+
+    products = workbook.create_sheet(VISUAL_SHEET_NAMES[1])
+    _append(products, ("商品销售分析｜模拟数据",))
+    _append(products, (None,))
+    _append(products, ("完整排行保留所有已支付商品；图表最多展示净销量前10。",))
+    _append(products, ("净销量排名", "商品编号", "商品名称", "类别", "支付件数", "退款件数", "净成交件数",
+                       "支付金额（元）", "退款金额（元）", "净销售金额（元）", "图表标签（商品 / 编号）"))
+    for rank, product in enumerate(report.products, 1):
+        _append(products, (_count(rank), product.product_id, product.product_name, product.category,
+                           _count(product.paid_quantity), _count(product.refund_quantity), _count(product.net_quantity),
+                           _money(product.payment_cents), _money(product.refund_cents), _money(product.net_sales_cents),
+                           f"{product.product_name} / {product.product_id}"))
+        for column in (1, 5, 6, 7):
+            products.cell(products.max_row, column).number_format = COUNT_FORMAT
+        for column in (8, 9, 10):
+            products.cell(products.max_row, column).number_format = MONEY_FORMAT
+    end = products.max_row
+    _analysis_style(products, {"A": 14, "B": 16, "C": 28, "D": 18, "E": 14, "F": 14, "G": 16,
+                               "H": 20, "I": 20, "J": 22, "K": 40}, 4,
+                    "虚构模拟订单。销量=支付件数−明确退款件数；金额同时列出支付、退款和净额，排名沿用净销量降序、商品编号字符串升序。同名不同编号不合并，金额不代表利润。")
+    products.auto_filter.ref = f"A4:K{end}"
+    if report.products:
+        chart = BarChart()
+        chart.type = "bar"  # 中文商品名较长，横向条形图比竖向柱形图更易读。
+        chart.title = "净成交件数前10（件｜模拟数据）"
+        chart.title.overlay = False
+        chart.style = 10
+        chart.width, chart.height = 26, 15
+        chart.y_axis.numFmt = COUNT_FORMAT
+        chart.x_axis.scaling.orientation = "maxMin"
+        chart.x_axis.axPos = "l"
+        chart.y_axis.axPos = "b"
+        for axis in (chart.x_axis, chart.y_axis):
+            axis.delete = False
+            axis.tickLblPos = "nextTo"
+        chart.y_axis.majorGridlines.spPr = GraphicalProperties()
+        chart.y_axis.majorGridlines.spPr.line.solidFill = "E2E8F0"
+        chart.legend = None
+        chart.add_data(Reference(products, min_col=7, min_row=4, max_row=min(end, 14)), titles_from_data=True)
+        chart.set_categories(Reference(products, min_col=11, min_row=5, max_row=min(end, 14)))
+        products.add_chart(chart, "M4")
+    else:
+        _append(products, ("没有已支付商品，不生成空排行图。",))
+
+    refunds = workbook.create_sheet(VISUAL_SHEET_NAMES[2])
+    _append(refunds, ("退款分析｜模拟数据",))
+    _append(refunds, (None,))
+    _append(refunds, ("金额率和订单率分母不同；都不是退货件数率，也不是申请退款率。",))
+    _append(refunds, ("指标", "数值", "口径 / 单位", "说明"))
+    for values in (
+        ("退款总金额", _money(report.refund_cents), "元", "累计已完成退款，不含申请中金额"),
+        ("支付订单数", _count(report.paid_order_count), "笔", "包括之后全额、部分退款的唯一订单"),
+        ("退款订单数", _count(report.refund_order_count), "笔", "整单已发生退款，一单多商品仅算一笔"),
+        ("全额退款订单数", _count(report.full_refund_order_count), "笔", "按原有已全额退款状态去重"),
+        ("部分退款订单数", _count(report.partial_refund_order_count), "笔", "按原有部分退款状态去重；包括只退差价"),
+        ("退款金额率", _display_ratio(report.refund_amount_ratio), "退款金额 ÷ 支付金额", "分母为零时无法计算；展示舍入到0.01%"),
+        ("退款订单率", _display_ratio(report.refund_order_ratio), "退款订单数 ÷ 支付订单数", "分母为零时无法计算；展示舍入到0.01%"),
+    ):
+        _append(refunds, values)
+        if isinstance(values[1], Decimal):
+            refunds.cell(refunds.max_row, 2).number_format = "0.00%" if "率" in values[0] else MONEY_FORMAT
+        elif isinstance(values[1], int):
+            refunds.cell(refunds.max_row, 2).number_format = COUNT_FORMAT
+    _append(refunds, (None,))
+    _append(refunds, ("退款趋势按下单日期归组，不能判断哪一天实际发生了退款。",))
+    _append(refunds, ("缺失日期不补零；同一订单的全部商品行属于同一下单日期。",))
+    _append(refunds, ("下单日期", "退款金额（元）", "退款订单数（笔）", "支付订单数（笔）"))
+    for day in report.daily:
+        _append(refunds, (datetime(day.day.year, day.day.month, day.day.day), _money(day.refund_cents),
+                          _count(day.refund_order_count), _count(day.paid_order_count)))
+        refunds.cell(refunds.max_row, 1).number_format = "yyyy-mm-dd"
+        refunds.cell(refunds.max_row, 2).number_format = MONEY_FORMAT
+    _analysis_style(refunds, {"A": 28, "B": 22, "C": 32, "D": 46}, 4,
+                    "虚构模拟订单。退款按订单当前状态及明细累计已完成金额统计；没有退款发生日期，图表展示的是下单日期归组的退款快照，不是每日实际退款流水。")
+    for cell in refunds[15]:
+        cell.font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
+        cell.fill = PatternFill("solid", fgColor="244A64")
+    for row in (13, 14):
+        refunds.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    _line_chart(refunds, "退款快照（按下单日期归组，元｜模拟数据）", 15, refunds.max_row, (2,), "F15")
+    _append(workbook["数据校验摘要"], ("可视化说明", "5C 模拟数据分析；按下单日期归组的快照；退款率分母见退款分析；图表和数据均为静态结果"))
+
+
 def _serialize_and_verify(workbook: Workbook) -> bytes:
     """先在内存完成 XLSX，并回读检查每个值和关键格式，不产生正式文件。"""
     with io.BytesIO() as buffer:
@@ -160,9 +331,14 @@ def _serialize_and_verify(workbook: Workbook) -> bytes:
         buffer.seek(0)
         restored = load_workbook(buffer, data_only=False)
         try:
-            if restored.sheetnames != list(SHEET_NAMES):
+            if (workbook.sheetnames not in (list(SHEET_NAMES), list(SHEET_NAMES + VISUAL_SHEET_NAMES)) or
+                    restored.sheetnames != workbook.sheetnames):
                 raise ExcelReportError("生成的工作表清单异常。")
             for original, saved in zip(workbook.worksheets, restored.worksheets):
+                # 图表引用只能指向本次工作簿数据；回读验证其序列、标题、轴及样式没有丢失或改变。
+                if [tostring(chart.to_tree()) for chart in original._charts] != [
+                        tostring(chart.to_tree()) for chart in saved._charts]:
+                    raise ExcelReportError("图表内容或数据引用回读不一致。")
                 if (original.max_row, original.max_column, original.freeze_panes, original.auto_filter.ref) != (
                         saved.max_row, saved.max_column, saved.freeze_panes, saved.auto_filter.ref):
                     raise ExcelReportError("工作表结构或表头设置回读不一致。")
@@ -196,7 +372,7 @@ def _publish_no_replace(temporary: Path, destination: Path):
     os.rename(temporary, destination)
 
 
-def export_excel(csv_path: str | Path, output_path: str | Path | None = None) -> Path:
+def export_excel(csv_path: str | Path, output_path: str | Path | None = None, *, visual: bool = False) -> Path:
     """完整校验 → 复用指标 → 内存回读 → 临时文件 → Windows 无覆盖发布。"""
     report = calculate_metrics(csv_path)  # 校验异常直接向上传递；此前不创建输出目录。
     generated_at = datetime.now(BEIJING_TIME).replace(tzinfo=None, microsecond=0)
@@ -213,6 +389,8 @@ def export_excel(csv_path: str | Path, output_path: str | Path | None = None) ->
         if os.path.lexists(destination):
             raise ExcelReportError(f"目标已经存在，拒绝覆盖：{destination}")
         workbook = _build_workbook(report, Path(csv_path).name, generated_at)
+        if visual:
+            _add_visual_analysis(workbook, report)
         payload = _serialize_and_verify(workbook)
         workbook.close()
         workbook = None

@@ -118,8 +118,10 @@ def _build_workbook(report: MetricsReport, source_name: str, generated_at: datet
 
     summary = workbook.create_sheet(SHEET_NAMES[2])
     _append(summary, ("项目", "内容"))
+    source = report.source
+    is_excel = source is not None and source.file_format == "XLSX"
     for values in (
-        ("输入 CSV 文件名", _text(source_name)),
+        ("输入 Excel 文件名" if is_excel else "输入 CSV 文件名", _text(source.file_name if source else source_name)),
         ("校验结果", "整份数据通过既有严格校验；未丢弃异常行或自动补值"),
         ("商品明细数", _count(report.line_count)),
         ("唯一订单数", _count(report.total_order_count)),
@@ -128,9 +130,19 @@ def _build_workbook(report: MetricsReport, source_name: str, generated_at: datet
         ("商品排行口径", "购买件数 − 明确退款件数；只退差价不扣件数；并列按商品编号字符串升序"),
         ("数据时间边界", "订单状态快照；缺少支付和退款发生时间，不是每日资金流水"),
         ("报表生成时间（北京时间 UTC+08:00）", generated_at),
-        ("使用提示", "本项目附带 CSV 为虚构模拟数据。修改 CSV 后需重新运行程序，本报表不会自动更新"),
+        ("使用提示", "请使用虚构模拟订单练习。修改 Excel 后需重新读取并确认映射，本报表不会自动更新" if is_excel else
+         "本项目附带 CSV 为虚构模拟数据。修改 CSV 后需重新运行程序，本报表不会自动更新"),
     ):
         _append(summary, values)
+    # 追加来源行，不移动原有指标、生成时间及其格式位置，保留 CSV 报表兼容性。
+    _append(summary, ("输入文件格式", source.file_format if source else "CSV"))
+    if is_excel:
+        for values in (("输入工作表", source.sheet_name), ("表头原始行号", source.header_row),
+                       ("输入快照 SHA256", source.sha256),
+                       ("快照说明", "结果对应映射确认时的内存快照；源文件后来变化需重新运行并确认")):
+            _append(summary, values)
+            if values[0] == "表头原始行号":
+                summary.cell(summary.max_row, 2).number_format = COUNT_FORMAT
     summary["B4"].number_format = COUNT_FORMAT
     summary["B5"].number_format = COUNT_FORMAT
     summary["B10"].number_format = "yyyy-mm-dd hh:mm:ss"

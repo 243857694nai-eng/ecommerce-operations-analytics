@@ -2,11 +2,11 @@
 
 ## 当前状态
 
-第五阶段 5A：Excel 订单读取、字段映射确认与严格校验，2026-10-18。
+第五阶段 5B：CSV／Excel 统一接入指标计算与报表导出，2026-10-18。
 
-**当前全部使用虚构模拟订单，不是真实客户或企业经营数据。已实现只读 CSV 读取、严格校验、四类运营指标计算及三工作表 Excel 导出。新增 Excel 订单映射与校验，但尚未将 Excel 订单接入指标和报表流程。尚未实现图表或日报。**
+**当前全部使用虚构模拟订单，不是真实客户或企业经营数据。已实现 CSV／Excel 读取、Excel 字段映射确认、严格校验、四类运营指标计算及三工作表 Excel 导出。CSV 保持原有使用方式，Excel 必须先确认映射并通过整份校验。尚未实现图表或日报。**
 
-本阶段经确认，仅在项目 `.venv` 中安装 openpyxl 3.1.5 和必要依赖 et-xmlfile 2.0.0，使用 Python 3.13.2。全局 Python 环境保持不变。项目已有本地 Git 基线，本阶段不创建提交、不上传 GitHub，不创建数据库或连接付费 API。已结项的批量文件重命名工具不属于本项目。
+第四阶段经确认，仅在项目 `.venv` 中安装 openpyxl 3.1.5 和必要依赖 et-xmlfile 2.0.0，使用 Python 3.13.2；5B 沿用现有环境，没有新增依赖。全局 Python 环境保持不变。项目已有本地 Git 基线，本阶段不创建提交、不上传 GitHub，不创建数据库或连接付费 API。已结项的批量文件重命名工具不属于本项目。
 
 ## 这个项目解决什么问题
 
@@ -25,7 +25,9 @@
 │   ├── 开源项目调查.md
 │   ├── 读取与校验说明.md
 │   ├── 指标计算说明.md
-│   └── Excel报表导出说明.md
+│   ├── Excel报表导出说明.md
+│   ├── Excel订单导入与字段映射说明.md
+│   └── CSV与Excel完整流程说明.md
 ├── csv_reader.py
 ├── order_validator.py
 ├── validate_orders.py
@@ -36,6 +38,13 @@
 ├── excel_report.py
 ├── report_excel.py
 ├── test_excel_report.py
+├── field_mapping.py
+├── excel_reader.py
+├── inspect_excel.py
+├── order_loader.py
+├── test_field_mapping.py
+├── test_excel_reader.py
+├── test_order_pipeline.py
 ├── requirements.txt
 └── README.md
 ```
@@ -52,6 +61,7 @@
 - `指标计算说明.md`：公式、实际验收结果、边界情况、运行和测试方法。
 - `excel_report.py`：复用现有指标生成三个中文工作表；内存回读验证、临时写入及 Windows 无覆盖发布。
 - `report_excel.py`：中文导出命令；`test_excel_report.py`：隔离文件导出及异常测试。
+- `order_loader.py`：统一输入分流并保留来源信息，Excel 复用 `inspect_excel.py` 的交互与校验；`test_order_pipeline.py`：完整流程集成测试。
 - `requirements.txt`：固定 Excel 导出依赖版本；`Excel报表导出说明.md`：使用说明、开源参考和风险边界。
 - `.venv/`、`output/`：分别保存项目依赖和生成报表，均已由 `.gitignore` 排除，不属于待提交源码。
 
@@ -140,7 +150,7 @@ python -B -X utf8 report_metrics.py
 .\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -v
 ```
 
-第三阶段在 Python 3.13.2 上通过 **76 项测试 = 原有 43 项 + 指标测试 33 项**。第四阶段又增加 41 项 Excel 报表测试；第五阶段 5A 初版增加 77 项读取与映射测试，日期安全修复再增加 11 项，当前上述命令运行全部 **205 项**。指标测试覆盖固定验收基准、多商品订单、退款、金额精度、零分母、稳定排序，以及错误数据不输出正式结果等情况。测试只读原始样本，其他输入均在新建的隔离临时目录中。
+第三阶段在 Python 3.13.2 上通过 **76 项测试 = 原有 43 项 + 指标测试 33 项**。第四阶段增加 41 项报表测试；5A 增加 77 项读取与映射测试及 11 项日期修复测试，共 205 项；5B 再增加 36 项集成测试，当前全部 **241 项**。指标测试覆盖固定验收基准、多商品订单、退款、金额精度、零分母、稳定排序，以及错误数据不输出正式结果等情况。测试只读原始样本，其他输入均在新建的隔离临时目录中。
 
 具体公式、完整商品排名和已知限制见 [指标计算说明](docs/指标计算说明.md)。原始模拟 CSV、第一阶段统计口径、既有校验与指标源码及测试均保持不变。
 
@@ -188,10 +198,25 @@ python -B -X utf8 report_metrics.py
 
 新增 `field_mapping.py`、`excel_reader.py`、`inspect_excel.py` 和两个测试文件；具体别名、交互步骤与安全限制见 [Excel 订单导入与字段映射说明](docs/Excel订单导入与字段映射说明.md)。本轮没有新增依赖。
 
+## Excel 订单计算指标并导出报表（5B）
+
+使用自己新建的模拟订单 `.xlsx`，运行以下命令之一：
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 report_metrics.py "C:\你的临时目录\模拟订单.xlsx"
+.\.venv\Scripts\python.exe -B -X utf8 report_excel.py "C:\你的临时目录\模拟订单.xlsx" --output "output\模拟Excel运营报表.xlsx"
+```
+
+流程仍要求明确选择工作表、表头，核实每列映射，必要时确认金额明细粒度，最后输入 `确认`。整份数据全部通过既有校验后才计算；取消或任何数据错误均不输出部分正式指标、不生成报表。目标文件存在时拒绝覆盖，可以换一个新名字或省略 `--output` 生成随机新名字。
+
+报表仍是运营总览、商品销量排行和数据校验摘要。摘要区分 CSV／XLSX；Excel 额外记录实际工作表、表头行和输入快照 SHA256。指标沿用原有口径，原始 CSV、输入 Excel 和已有报表保持不变。
+
+本轮新增 `order_loader.py` 统一输入分流、`test_order_pipeline.py` 集成测试；从原有交互提取可调用函数，没有重写校验、指标或安全保存机制。完整命令、返回码、来源说明、开源调查和限制见 [CSV 与 Excel 完整流程说明](docs/CSV与Excel完整流程说明.md)。
+
 ## 下一阶段准备做什么
 
 等待你验收本阶段后，再讨论下一步；当前不自动继续开发其他功能。
 
-5B 才考虑把通过映射和整份校验的 Excel 订单接入原有指标及报表入口；之后再分阶段考虑图表及基于已验证数字的模板日报。是否安装其他库，届时单独确认。日报先由固定模板生成，不依赖付费 API。
+CSV／Excel 完整流程已接通；之后再分阶段讨论图表及基于已验证数字的模板日报。是否安装其他库，届时单独确认。日报先由固定模板生成，不依赖付费 API。
 
 用于简历展示时，应如实描述为“基于虚构订单数据的学习项目”，不能把模拟数字写成真实运营业绩。

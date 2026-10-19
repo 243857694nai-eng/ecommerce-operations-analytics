@@ -1,11 +1,12 @@
-"""只在整份 CSV 校验通过后计算指标；金额以整数分和精确分数保存。"""
+"""只在整份输入校验通过后计算指标；金额以整数分和精确分数保存。"""
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
-from order_validator import PAID_STATUSES, load_and_validate
+from order_validator import PAID_STATUSES
+from order_loader import OrderSource, load_orders
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class MetricsReport:
     paid_order_count: int
     net_order_count: int
     products: tuple[ProductMetrics, ...]
+    # 来源用于追溯，不参与业务指标值的等价比较。
+    source: OrderSource | None = field(default=None, compare=False)
 
     @property
     def net_sales_cents(self) -> int:
@@ -59,8 +62,9 @@ class MetricsReport:
 
 
 def calculate_metrics(path: str | Path) -> MetricsReport:
-    """公共入口：先完整读取并校验；失败直接抛出 CsvValidationError，无部分报表。"""
-    records = load_and_validate(path)
+    """公共入口：CSV 沿用原路径，Excel 必须先映射确认并完整校验，无部分报表。"""
+    orders = load_orders(path)
+    records = orders.records
     # 在这里之前不计算指标。复用现有行级金额、状态和整单一致性规则。
     order_net = defaultdict(int)
     product_lines = defaultdict(list)
@@ -96,6 +100,7 @@ def calculate_metrics(path: str | Path) -> MetricsReport:
         paid_order_count=len(order_net),
         net_order_count=sum(net > 0 for net in order_net.values()),
         products=tuple(products),
+        source=orders.source,
     )
 
 
